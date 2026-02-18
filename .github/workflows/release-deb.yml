@@ -1,0 +1,95 @@
+name: Build kernel .deb packages
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache
+          sudo apt-get clean
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential bc bison flex libelf-dev libssl-dev \
+            dwarves debhelper rsync cpio kmod
+
+      - name: Build kernel .deb packages
+        run: |
+          make defconfig
+          make -j$(nproc) bindeb-pkg
+          mkdir -p debs
+          mv ../*.deb debs/
+          ls -lh debs/
+
+      - name: Determine version
+        id: version
+        run: |
+          DEB=$(ls debs/linux-image-*.deb | head -1)
+          version=$(dpkg-deb -f "$DEB" Version)
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Repack .debs for reprepro compatibility
+        run: |
+          for DEB_PATH in debs/*.deb; do
+            if ar t "$DEB_PATH" | grep -q '\.zst'; then
+              echo "Repacking $(basename "$DEB_PATH") from zstd to xz..."
+              TMPDIR=$(mktemp -d)
+              cd "$TMPDIR"
+              ar x "$GITHUB_WORKSPACE/$DEB_PATH"
+              for f in *.zst; do
+                [ -f "$f" ] || continue
+                zstd -d "$f"
+                xz "${f%.zst}"
+                rm "$f"
+              done
+              rm "$GITHUB_WORKSPACE/$DEB_PATH"
+              ar rcs "$GITHUB_WORKSPACE/$DEB_PATH" debian-binary control.tar.xz data.tar.xz
+              cd "$GITHUB_WORKSPACE"
+              rm -rf "$TMPDIR"
+            fi
+          done
+          ls -lh debs/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Linux kernel ${{ steps.version.outputs.version }}
+          body: |
+            Automated kernel build from commit ${{ github.sha }}
+
+            Install:
+            ```
+            sudo dpkg -i linux-image-*.deb linux-headers-*.deb
+            ```
+          files: debs/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify package repository
+        run: |
+          sleep 5
+          SIGNATURE=$(echo -n '{"repo":"netlinux-ai/linux","tag":"${{ steps.version.outputs.tag }}"}' \
+            | openssl dgst -sha256 -hmac "${{ secrets.WEBHOOK_SECRET }}" -binary \
+            | xxd -p -c 256)
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Webhook-Signature: sha256=${SIGNATURE}" \
+            -d '{"repo":"netlinux-ai/linux","tag":"${{ steps.version.outputs.tag }}"}' \
+            https://packages.netlinux.co.uk/webhook/update-repo
