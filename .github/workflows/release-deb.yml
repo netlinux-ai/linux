@@ -31,6 +31,18 @@ jobs:
       - name: Build kernel .deb packages
         run: |
           make defconfig
+
+          # Enable filesystems required for live-boot (squashfs + overlay)
+          ./scripts/config --enable CONFIG_SQUASHFS
+          ./scripts/config --enable CONFIG_SQUASHFS_XZ
+          ./scripts/config --enable CONFIG_SQUASHFS_ZLIB
+          ./scripts/config --enable CONFIG_SQUASHFS_LZO
+          ./scripts/config --enable CONFIG_SQUASHFS_ZSTD
+          ./scripts/config --enable CONFIG_OVERLAY_FS
+          ./scripts/config --enable CONFIG_FUSE_FS
+          ./scripts/config --enable CONFIG_CUSE
+
+          make olddefconfig
           make -j$(nproc) bindeb-pkg
           mkdir -p debs
           mv ../*.deb debs/
@@ -73,6 +85,8 @@ jobs:
           name: Linux kernel ${{ steps.version.outputs.version }}
           body: |
             Automated kernel build from commit ${{ github.sha }}
+
+            Includes squashfs, overlayfs, and FUSE support for live-boot.
 
             Install:
             ```
